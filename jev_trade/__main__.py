@@ -39,6 +39,9 @@ def main() -> None:
     p_eval.add_argument("--file", default=None, help="decisions.jsonl path (default: LOG_DIR/decisions.jsonl)")
     p_eval.add_argument("--equity", type=float, default=10_000.0)
     p_eval.add_argument("--verbose", action="store_true")
+    p_db = sub.add_parser("dashboard", help="local dashboard from LOG_DIR files (no exchange connection)")
+    p_db.add_argument("--port", type=int, default=8787)
+    p_db.add_argument("--host", default="127.0.0.1")
     p_tn = sub.add_parser("testnet", help="smoke-test the live order path on Binance futures testnet with a tiny round trip")
     p_tn.add_argument("--side", choices=["long", "short"], default="long")
     p_tn.add_argument("--keep-open", action="store_true", help="leave the test position open (to watch the bot manage it)")
@@ -48,6 +51,12 @@ def main() -> None:
     p_news.add_argument("action", choices=["fetch", "check"], help="fetch = list headlines; check = run one Jev screening now")
     args = ap.parse_args()
 
+    if args.cmd == "dashboard":
+        from .dashboard import serve
+
+        settings.log_dir.mkdir(parents=True, exist_ok=True)
+        serve(settings, port=args.port, host=args.host)
+        return
     if args.cmd == "testnet":
         from .testnet import run
 

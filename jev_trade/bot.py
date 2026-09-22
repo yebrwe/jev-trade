@@ -34,6 +34,28 @@ class Bot:
         self.runtime_path = settings.log_dir / "runtime_state.json"
         self.runtime = self._load_runtime()
         self.decisions_path = settings.log_dir / "decisions.jsonl"
+        self._last_position = None   # position seen at the previous cycle (to detect exchange-side closes)
+        self._last_price: float | None = None
+        self._recount_trades_today()
+
+    def _recount_trades_today(self) -> None:
+        """Daily trade count from decisions.jsonl (robust to a lost or stale runtime file)."""
+        today = time.strftime("%Y-%m-%d", time.gmtime())
+        n = 0
+        if self.decisions_path.exists():
+            with self.decisions_path.open(encoding="utf-8") as f:
+                for line in f:
+                    if not line.startswith('{"time": "' + today):
+                        continue
+                    try:
+                        r = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if r.get("dry_run") == self.s.dry_run and (r.get("execution") or {}).get("opened"):
+                        n += 1
+        if n > self.runtime.trades_for(time.time()):
+            self.runtime.trades_day, self.runtime.trades_today = today, n
+            self._save_runtime()
 
     # ---------- persistence ----------
     def _load_runtime(self) -> RuntimeState:
@@ -50,6 +72,24 @@ class Bot:
     def _log(self, record: dict) -> None:
         with self.decisions_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+
+    def _log_trade(self, pos, exit_price: float | None, reason: str, estimated: bool = True, pnl: float | None = None) -> None:
+        """Append a closed trade to trades.jsonl (read by the local dashboard)."""
+        if pos is None:
+            return
+        sign = 1 if pos.side == "long" else -1
+        if pnl is None and exit_price and pos.entry_price:
+            gross = (exit_price - pos.entry_price) * pos.qty * sign
+            fees = (exit_price + pos.entry_price) * pos.qty * self.s.taker_fee_bps / 10_000
+            pnl = gross - fees
+        rec = {
+            "time": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "side": pos.side, "qty": pos.qty, "entry_price": pos.entry_price, "exit_price": exit_price,
+            "leverage": pos.leverage, "pnl_usd": pnl, "estimated": estimated, "reason": reason,
+            "opened_at": pos.opened_at, "stop_loss": pos.stop_loss, "take_profit": pos.take_profit,
+        }
+        with (self.s.log_dir / "trades.jsonl").open("a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False, default=str) + "\n")
 
     # ---------- one decision cycle ----------
     def _price_shock(self, frames: dict) -> str | None:
@@ -81,6 +121,26 @@ class Bot:
                 self.runtime.position_opened_at = None
                 self._save_runtime()
         position = self.broker.get_position(self.s.symbol)
+        self._last_price = realtime.get("last") or self._last_price
+        if position is None and self._last_position is not None:
+            # the exchange closed it for us (stop or target hit) between cycles: read the actual fills
+            lp = self._last_position
+            fills = None
+            if isinstance(self.broker, LiveBroker):
+                since = int(((lp.opened_at or self.runtime.position_opened_at or time.time() - 86400) - 60) * 1000)
+                fills = self.broker.closing_fills(self.s.symbol, lp.side, since)
+            if fills and fills.get("exit_price"):
+                entry_fee = lp.entry_price * lp.qty * self.s.taker_fee_bps / 10_000
+                pnl = fills["realized_pnl"] - fills["fee"] - entry_fee
+                which = "take-profit" if ((fills["exit_price"] > lp.entry_price) == (lp.side == "long")) else "stop-loss"
+                self._log_trade(lp, fills["exit_price"], f"{which} hit at exchange", estimated=False, pnl=pnl)
+                print(f"[bot] {which} hit at exchange: {lp.side} {lp.qty} exit {fills['exit_price']:.1f} pnl {pnl:+.2f}")
+            else:
+                self._log_trade(lp, self._last_price, "stop/target hit at exchange", estimated=True)
+                print(f"[bot] position closed at exchange (stop/target): {lp.side} {lp.qty}")
+            self.runtime.last_exit_at = time.time()
+            self._save_runtime()
+        self._last_position = position
         if position is None:
             if self.runtime.position_opened_at is not None:
                 self.runtime.position_opened_at = None
@@ -167,6 +227,10 @@ class Bot:
                 self.runtime.last_exit_at = time.time()
                 self.runtime.position_opened_at = None
                 self._save_runtime()
+                exit_px = res.get("exit") or self._last_price
+                self._log_trade(position, exit_px, "bot exit signal: " + "; ".join(d.reasons)[:120],
+                                estimated=res.get("pnl") is None, pnl=res.get("pnl"))
+                self._last_position = None
             return res
         return None
 

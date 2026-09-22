@@ -71,6 +71,7 @@ class Settings:
     max_cost_pct_of_margin: float = field(default_factory=lambda: _float("MAX_COST_PCT_OF_MARGIN", 10.0))  # fees+funding
     maint_margin_rate_fallback: float = field(default_factory=lambda: _float("MAINT_MARGIN_RATE", 0.004))
     taker_fee_bps: float = field(default_factory=lambda: _float("TAKER_FEE_BPS", 5.0))
+    slippage_bps_est: float = field(default_factory=lambda: _float("SLIPPAGE_BPS_EST", 3.0))  # per leg, for sizing
     funding_periods_est: int = field(default_factory=lambda: _int("FUNDING_PERIODS_EST", 3))
     margin_mode: str = field(default_factory=lambda: os.getenv("MARGIN_MODE", "isolated"))
     risk_per_trade_pct: float = field(default_factory=lambda: _float("RISK_PER_TRADE_PCT", 1.0))

@@ -237,6 +237,27 @@ class LiveBroker:
                 return (t["timestamp"] or 0) / 1000 or None
         return None
 
+    def closing_fills(self, symbol: str, side: str, since_ms: int) -> dict | None:
+        """Actual exit of a position closed at the exchange: fills on the closing side since `since_ms`.
+
+        Returns {exit_price (VWAP), qty, realized_pnl (exchange-reported, net of nothing), fee, time}.
+        """
+        try:
+            trades = self.ex.fetch_my_trades(symbol, since=since_ms, limit=200)
+        except Exception as e:
+            print(f"[broker] fetch_my_trades failed: {e}")
+            return None
+        closing_side = "sell" if side == "long" else "buy"
+        fills = [t for t in trades if t.get("side") == closing_side]
+        if not fills:
+            return None
+        qty = sum(float(t["amount"]) for t in fills)
+        vwap = sum(float(t["price"]) * float(t["amount"]) for t in fills) / qty if qty else None
+        realized = sum(float((t.get("info") or {}).get("realizedPnl") or 0) for t in fills)
+        fee = sum(float((t.get("fee") or {}).get("cost") or 0) for t in fills)
+        return {"exit_price": vwap, "qty": qty, "realized_pnl": realized, "fee": fee,
+                "time": max(int(t["timestamp"] or 0) for t in fills) / 1000}
+
     def _configure(self, symbol: str) -> None:
         if symbol in self._configured:
             return
@@ -281,11 +302,16 @@ class LiveBroker:
                         tp = price
             except Exception:
                 pass
+            lev = p.get("leverage")
+            if not lev:  # Binance no longer reports leverage on the position; derive it from margin
+                notional_v = abs(float(p.get("notional") or 0)) or qty * mark
+                im = float(p.get("initialMargin") or 0) or float((p.get("info", {}) or {}).get("isolatedWallet") or 0)
+                lev = round(notional_v / im) if im > 0 else self.s.leverage
             return Position(
                 side=side,
                 qty=qty,
                 entry_price=entry,
-                leverage=float(p.get("leverage") or self.s.leverage),
+                leverage=float(lev),
                 mark_price=mark,
                 unrealized_pnl_pct=pnl_pct,
                 liquidation_price=float(liq) if liq else None,
@@ -329,14 +355,14 @@ class LiveBroker:
         order_side = "buy" if side == "long" else "sell"
         exit_side = "sell" if side == "long" else "buy"
         entry = self.ex.create_order(symbol, "market", order_side, qty, None, self._pos_params(side, closing=False))
-        result = {"entry": entry.get("id"), "stop": None, "take_profit": None, "opened_at": time.time(),
-                  "leverage": lev_in_effect}
+        result = {"entry_order_id": entry.get("id"), "stop_order_id": None, "tp_order_id": None,
+                  "opened_at": time.time(), "leverage": lev_in_effect}
         try:
             sl = self.ex.create_order(
                 symbol, "market", exit_side, qty, None,
                 {"stopLossPrice": self.ex.price_to_precision(symbol, stop_loss), **self._pos_params(side, closing=True)},
             )
-            result["stop"] = sl.get("id")
+            result["stop_order_id"] = sl.get("id")
         except Exception as e:
             result["stop_error"] = str(e)
         try:
@@ -344,7 +370,7 @@ class LiveBroker:
                 symbol, "market", exit_side, qty, None,
                 {"takeProfitPrice": self.ex.price_to_precision(symbol, take_profit), **self._pos_params(side, closing=True)},
             )
-            result["take_profit"] = tp.get("id")
+            result["tp_order_id"] = tp.get("id")
         except Exception as e:
             result["take_profit_error"] = str(e)
         return result

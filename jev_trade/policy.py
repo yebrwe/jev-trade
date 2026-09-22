@@ -142,7 +142,11 @@ def size_position(
     stop_dist = atr * s.atr_stop_mult
     tp_dist = atr * s.atr_tp_mult
     risk_pct = s.risk_tiers[min(tier, len(s.risk_tiers) - 1)] * scale
-    qty = equity * risk_pct / 100 / stop_dist
+    # The loss at the stop is price distance PLUS round-trip costs (taker fee both legs, slippage both legs,
+    # expected funding), all proportional to notional. Size so that the TOTAL loss equals the risk budget.
+    cost_rate = (2 * s.taker_fee_bps + 2 * s.slippage_bps_est) / 10_000 + s.funding_periods_est * 0.0001
+    loss_per_unit = stop_dist + price * cost_rate
+    qty = equity * risk_pct / 100 / loss_per_unit
     notional = qty * price
 
     lev = s.leverage_tiers[min(tier, len(s.leverage_tiers) - 1)]
@@ -184,6 +188,9 @@ def size_position(
         "qty": qty, "stop_loss": sl, "take_profit": tp, "notional": notional, "leverage": lev,
         "risk_pct": risk_pct, "margin": notional / lev, "liq_dist_pct": (1 / lev - maint) * 100,
         "stop_dist_pct": stop_pct * 100, "notes": notes,
+        "loss_at_stop_usd": qty * loss_per_unit,
+        "price_loss_usd": qty * stop_dist,
+        "cost_usd": qty * price * cost_rate,
     }
 
 
@@ -254,7 +261,9 @@ def decide(
     )
     reasons.append(
         f"conviction {j.conviction_score:.2f} (conf {j.conviction_confidence:.2f}) -> tier {tier}: "
-        f"risk {sz['risk_pct']:.2f}% of equity, {sz['leverage']}x, margin {sz['margin']:.0f} USDT, "
+        f"risk {sz['risk_pct']:.2f}% of equity = {sz['loss_at_stop_usd']:.2f} USDT at the stop "
+        f"(price {sz['price_loss_usd']:.2f} + fees/slippage/funding {sz['cost_usd']:.2f}), "
+        f"{sz['leverage']}x, margin {sz['margin']:.0f} USDT, "
         f"stop {sz['stop_dist_pct']:.2f}% vs liquidation {sz['liq_dist_pct']:.2f}%"
     )
     reasons.extend(sz["notes"])

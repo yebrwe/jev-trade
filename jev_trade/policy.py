@@ -40,6 +40,10 @@ class Decision:
     stop_loss: float | None = None
     take_profit: float | None = None
     notional: float | None = None
+    leverage: int | None = None
+    risk_pct: float | None = None
+    conviction_tier: int | None = None
+    margin: float | None = None
 
     def to_dict(self) -> dict:
         return dict(self.__dict__)
@@ -51,11 +55,18 @@ def _entry_gate(j: Judgment, s: Settings, reasons: list[str]) -> bool:
         reasons.append("jev prefers hold")
         return False
     p = j.entry_probs.get(j.entry_action, 0.0)
+    opposite = "short" if j.entry_action == "long" else "long"
+    edge = p - j.entry_probs.get(opposite, 0.0)
+    # In a 3-way Choice the `hold` mass dilutes confidence, so the directional edge
+    # (P(side) - P(opposite)) is the meaningful certainty measure; confidence is only a soft floor.
     if j.entry_confidence < s.min_entry_confidence:
         reasons.append(f"entry confidence {j.entry_confidence:.2f} < {s.min_entry_confidence}")
         ok = False
     if p < s.min_entry_prob:
         reasons.append(f"P({j.entry_action}) {p:.2f} < {s.min_entry_prob}")
+        ok = False
+    if edge < s.min_direction_edge:
+        reasons.append(f"direction edge P({j.entry_action})-P({opposite}) {edge:.2f} < {s.min_direction_edge}")
         ok = False
     if j.setup_score < s.min_setup_score:
         reasons.append(f"setup_quality {j.setup_score:.2f} < {s.min_setup_score}")
@@ -63,8 +74,11 @@ def _entry_gate(j: Judgment, s: Settings, reasons: list[str]) -> bool:
     if j.choppy >= s.choppy_max:
         reasons.append(f"choppy {j.choppy:.2f} >= {s.choppy_max}")
         ok = False
-    if j.overextended >= 0.7:
-        reasons.append(f"overextended {j.overextended:.2f} >= 0.70")
+    # direction-aware exhaustion guard: a long is blocked by overbought, a short by oversold
+    against = j.overbought if j.entry_action == "long" else j.oversold
+    label = "overbought" if j.entry_action == "long" else "oversold"
+    if against >= s.overextended_max:
+        reasons.append(f"{label} {against:.2f} >= {s.overextended_max}; no {j.entry_action} into an exhausted move")
         ok = False
     return ok
 
@@ -100,23 +114,77 @@ def _perspective_gate(j: Judgment, s: Settings, meta: dict, reasons: list[str]) 
     return ok
 
 
+def conviction_tier(j: Judgment, s: Settings) -> int:
+    """Map Jev's conviction Score (expected level 0..3) to a tier index. Low confidence drops one tier."""
+    n = len(s.leverage_tiers)
+    tier = int(round(j.conviction_score))
+    if j.conviction_confidence < s.conviction_min_confidence:
+        tier -= 1
+    return max(0, min(n - 1, tier))
+
+
 def size_position(
-    side: str, price: float, atr: float | None, equity: float, s: Settings, scale: float
-) -> tuple[float, float, float, float]:
-    """Return (qty, stop_loss, take_profit, notional). Risk = RISK_PER_TRADE_PCT of equity at the stop."""
+    side: str, price: float, atr: float | None, equity: float, s: Settings, scale: float,
+    tier: int = 1, leverage_limits: dict | None = None,
+) -> dict:
+    """Code-owned sizing. Returns qty, stop, target, notional, leverage, risk_pct and the guard notes.
+
+    Risk (loss at the stop) = RISK_TIERS[tier] % of equity, scaled by `scale`.
+    Leverage = LEVERAGE_TIERS[tier], then reduced until every guard passes:
+      - stop distance <= STOP_LIQ_RATIO_MAX x liquidation distance
+      - round-trip fees + expected funding <= MAX_COST_PCT_OF_MARGIN of the margin
+      - exchange bracket max leverage for this notional
+      - margin required <= MAX_POSITION_PCT of equity
+    """
+    notes: list[str] = []
     if atr is None or atr <= 0:
-        atr = price * 0.005  # fallback 0.5%
+        atr = price * 0.005
     stop_dist = atr * s.atr_stop_mult
     tp_dist = atr * s.atr_tp_mult
-    risk_usd = equity * s.risk_per_trade_pct / 100 * scale
-    qty = risk_usd / stop_dist
-    max_notional = equity * s.max_position_pct / 100 * s.leverage
-    qty = min(qty, max_notional / price)
+    risk_pct = s.risk_tiers[min(tier, len(s.risk_tiers) - 1)] * scale
+    qty = equity * risk_pct / 100 / stop_dist
+    notional = qty * price
+
+    lev = s.leverage_tiers[min(tier, len(s.leverage_tiers) - 1)]
+    limits = leverage_limits or {}
+    maint = float(limits.get("maint_rate") or s.maint_margin_rate_fallback)
+    bracket_max = limits.get("max_leverage")
+    if bracket_max and lev > bracket_max:
+        notes.append(f"leverage capped by exchange bracket {int(bracket_max)}x")
+        lev = int(bracket_max)
+    stop_pct = stop_dist / price
+    cost_pct_notional = (2 * s.taker_fee_bps / 10_000) + s.funding_periods_est * 0.0001
+    while lev > 1:
+        liq_pct = 1 / lev - maint  # approximate isolated-margin liquidation distance
+        if liq_pct <= 0:
+            lev -= 1
+            continue
+        if stop_pct > s.stop_liq_ratio_max * liq_pct:
+            lev -= 1
+            continue
+        if cost_pct_notional * lev * 100 > s.max_cost_pct_of_margin:
+            lev -= 1
+            continue
+        break
+    tier_lev = s.leverage_tiers[min(tier, len(s.leverage_tiers) - 1)]
+    if lev < tier_lev and not any("bracket" in n for n in notes):
+        notes.append(f"leverage reduced {tier_lev}x -> {lev}x (stop vs liquidation / cost guard)")
+
+    max_margin = equity * s.max_position_pct / 100
+    if notional / lev > max_margin:
+        qty = max_margin * lev / price
+        notional = qty * price
+        notes.append(f"notional capped by MAX_POSITION_PCT ({s.max_position_pct}% margin)")
+
     if side == "long":
         sl, tp = price - stop_dist, price + tp_dist
     else:
         sl, tp = price + stop_dist, price - tp_dist
-    return qty, sl, tp, qty * price
+    return {
+        "qty": qty, "stop_loss": sl, "take_profit": tp, "notional": notional, "leverage": lev,
+        "risk_pct": risk_pct, "margin": notional / lev, "liq_dist_pct": (1 / lev - maint) * 100,
+        "stop_dist_pct": stop_pct * 100, "notes": notes,
+    }
 
 
 def decide(
@@ -175,17 +243,23 @@ def decide(
         reasons.append("no price available")
         return Decision(action="hold", reasons=reasons)
 
-    # size by setup quality (decent -> 60%, strong -> 100%) and higher/lower agreement
-    scale = 0.6 if j.setup_score < 2.5 else 1.0
-    if j.higher_lower_agree < 0.5:
-        scale *= 0.7
-        reasons.append(f"higher/lower agreement low ({j.higher_lower_agree:.2f}); size reduced")
-    qty, sl, tp, notional = size_position(j.entry_action, price, atr, equity, s, scale)
+    # size and leverage from Jev's conviction tier; code applies every safety guard
+    tier = conviction_tier(j, s)
+    scale = 1.0
+    sz = size_position(j.entry_action, price, atr, equity, s, scale, tier=tier,
+                       leverage_limits=meta.get("leverage_limits"))
     reasons.append(
         f"entry {j.entry_action}: P={j.entry_probs.get(j.entry_action, 0):.2f} conf={j.entry_confidence:.2f} "
         f"setup={j.setup_score:.2f} choppy={j.choppy:.2f} overextended={j.overextended:.2f}"
     )
+    reasons.append(
+        f"conviction {j.conviction_score:.2f} (conf {j.conviction_confidence:.2f}) -> tier {tier}: "
+        f"risk {sz['risk_pct']:.2f}% of equity, {sz['leverage']}x, margin {sz['margin']:.0f} USDT, "
+        f"stop {sz['stop_dist_pct']:.2f}% vs liquidation {sz['liq_dist_pct']:.2f}%"
+    )
+    reasons.extend(sz["notes"])
     return Decision(
-        action=j.entry_action, reasons=reasons, size_scale=scale, qty=qty,
-        stop_loss=sl, take_profit=tp, notional=notional,
+        action=j.entry_action, reasons=reasons, size_scale=scale, qty=sz["qty"],
+        stop_loss=sz["stop_loss"], take_profit=sz["take_profit"], notional=sz["notional"],
+        leverage=sz["leverage"], risk_pct=sz["risk_pct"], conviction_tier=tier, margin=sz["margin"],
     )

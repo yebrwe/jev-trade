@@ -11,8 +11,13 @@ DERIVED: dict[str, tuple[str, str, int]] = {
     "4h": ("1h", "4h", 4),
 }
 
-# "1y" is not a candle series: it is a one-year context block derived from daily bars.
-CONTEXT_ONLY = {"1y": ("1d", 365)}
+# "1y" is not a candle series: it is a long-term context block derived from daily (and weekly) bars.
+CONTEXT_ONLY = {"1y": ("1d", 1500)}
+
+# History depth. EMA200 needs several times its span to forget its starting value:
+# with 1000 bars the residual weight of the first bar is (1-2/201)^1000 ~ 0.005%.
+BARS_DEFAULT = 1000
+BARS = {"1d": 1500, "1w": 1000}  # 1w returns everything Binance has (~370 weeks for BTC USDT-M)
 
 _SECONDS = {"m": 60, "h": 3600, "d": 86400, "w": 604800, "M": 2592000, "y": 31536000}
 
@@ -26,13 +31,10 @@ def source_for(tf: str) -> tuple[str, int]:
     """Return (native timeframe to fetch, number of native bars needed) for a requested tf."""
     if tf in DERIVED:
         src, _, mult = DERIVED[tf]
-        return src, 300 * mult
+        return src, BARS_DEFAULT * mult
     if tf in CONTEXT_ONLY:
-        src, n = CONTEXT_ONLY[tf]
-        return src, n + 40
-    if tf == "1d":
-        return tf, 400
-    return tf, 300
+        return CONTEXT_ONLY[tf]
+    return tf, BARS.get(tf, BARS_DEFAULT)
 
 
 def resample(df: pd.DataFrame, tf: str) -> pd.DataFrame:

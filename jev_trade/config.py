@@ -57,19 +57,36 @@ class Settings:
     loop_interval_sec: int = field(default_factory=lambda: _int("LOOP_INTERVAL_SEC", 0))
 
     dry_run: bool = field(default_factory=lambda: _bool("DRY_RUN", True))
-    leverage: int = field(default_factory=lambda: _int("LEVERAGE", 3))
+    leverage: int = field(default_factory=lambda: _int("LEVERAGE", 10))  # fallback when no conviction answer
+    # Jev `conviction` (0 weak .. 3 very strong) -> leverage tier and risk-per-trade tier (code-owned mapping)
+    leverage_tiers: list[int] = field(
+        default_factory=lambda: [int(x) for x in os.getenv("LEVERAGE_TIERS", "10,20,35,50").split(",")]
+    )
+    risk_tiers: list[float] = field(
+        default_factory=lambda: [float(x) for x in os.getenv("RISK_TIERS", "0.5,1.0,1.5,2.0").split(",")]
+    )
+    conviction_min_confidence: float = field(default_factory=lambda: _float("CONVICTION_MIN_CONFIDENCE", 0.35))
+    # safety guards applied after the tier is chosen
+    stop_liq_ratio_max: float = field(default_factory=lambda: _float("STOP_LIQ_RATIO_MAX", 0.5))  # stop dist <= 50% of liq dist
+    max_cost_pct_of_margin: float = field(default_factory=lambda: _float("MAX_COST_PCT_OF_MARGIN", 10.0))  # fees+funding
+    maint_margin_rate_fallback: float = field(default_factory=lambda: _float("MAINT_MARGIN_RATE", 0.004))
+    taker_fee_bps: float = field(default_factory=lambda: _float("TAKER_FEE_BPS", 5.0))
+    funding_periods_est: int = field(default_factory=lambda: _int("FUNDING_PERIODS_EST", 3))
     margin_mode: str = field(default_factory=lambda: os.getenv("MARGIN_MODE", "isolated"))
     risk_per_trade_pct: float = field(default_factory=lambda: _float("RISK_PER_TRADE_PCT", 1.0))
     max_position_pct: float = field(default_factory=lambda: _float("MAX_POSITION_PCT", 30.0))
     atr_stop_mult: float = field(default_factory=lambda: _float("ATR_STOP_MULT", 2.0))
     atr_tp_mult: float = field(default_factory=lambda: _float("ATR_TP_MULT", 3.0))
     cooldown_candles: int = field(default_factory=lambda: _int("COOLDOWN_CANDLES", 3))
-    max_trades_per_day: int = field(default_factory=lambda: _int("MAX_TRADES_PER_DAY", 10))
+    max_trades_per_day: int = field(default_factory=lambda: _int("MAX_TRADES_PER_DAY", 30))
 
-    min_entry_confidence: float = field(default_factory=lambda: _float("MIN_ENTRY_CONFIDENCE", 0.50))
-    min_entry_prob: float = field(default_factory=lambda: _float("MIN_ENTRY_PROB", 0.60))
-    min_setup_score: float = field(default_factory=lambda: _float("MIN_SETUP_SCORE", 2.0))
-    choppy_max: float = field(default_factory=lambda: _float("CHOPPY_MAX", 0.50))
+    # entry gates (intraday, conviction-tiered sizing makes weak entries small rather than forbidden)
+    min_entry_confidence: float = field(default_factory=lambda: _float("MIN_ENTRY_CONFIDENCE", 0.05))  # soft floor
+    min_entry_prob: float = field(default_factory=lambda: _float("MIN_ENTRY_PROB", 0.40))
+    min_direction_edge: float = field(default_factory=lambda: _float("MIN_DIRECTION_EDGE", 0.15))  # P(side)-P(opposite)
+    min_setup_score: float = field(default_factory=lambda: _float("MIN_SETUP_SCORE", 1.0))
+    choppy_max: float = field(default_factory=lambda: _float("CHOPPY_MAX", 0.60))
+    overextended_max: float = field(default_factory=lambda: _float("OVEREXTENDED_MAX", 0.80))
     min_exit_prob: float = field(default_factory=lambda: _float("MIN_EXIT_PROB", 0.55))
     thesis_invalidated_threshold: float = field(
         default_factory=lambda: _float("THESIS_INVALIDATED_THRESHOLD", 0.70)

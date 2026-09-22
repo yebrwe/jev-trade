@@ -140,11 +140,12 @@ def replay(
         actions[d.action] += 1
         exec_txt = ""
         if d.action in ("long", "short"):
-            r = broker.open(settings.symbol, d.action, d.qty, d.stop_loss, d.take_profit)
+            r = broker.open(settings.symbol, d.action, d.qty, d.stop_loss, d.take_profit, leverage=d.leverage)
             if "error" not in r:
                 broker.state["position"]["opened_at"] = t.timestamp()
                 runtime.register_trade(t.timestamp())
-            exec_txt = f" -> open {d.action} @ {r.get('filled_at', 0):.1f} sl={d.stop_loss:.1f} tp={d.take_profit:.1f}"
+            exec_txt = (f" -> open {d.action} @ {r.get('filled_at', 0):.1f} {d.leverage}x risk {d.risk_pct:.1f}% "
+                        f"sl={d.stop_loss:.1f} tp={d.take_profit:.1f}")
         elif d.action == "exit":
             r = broker.close(settings.symbol)
             runtime.last_exit_at = t.timestamp()

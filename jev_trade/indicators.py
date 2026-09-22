@@ -10,7 +10,12 @@ import pandas as pd
 
 
 def ema(s: pd.Series, n: int) -> pd.Series:
-    return s.ewm(span=n, adjust=False, min_periods=n).mean()
+    """EMA with normalized weights (adjust=True): no arbitrary seed, unbiased on a finite window.
+
+    Combined with >= 1000 bars of history this matches a fully warmed-up recursive EMA
+    to well under 0.01%; on short series (weekly, ~370 bars) it is the honest estimate.
+    """
+    return s.ewm(span=n, adjust=True, min_periods=n).mean()
 
 
 def rsi(close: pd.Series, n: int = 14) -> pd.Series:
@@ -146,19 +151,26 @@ def compute(df: pd.DataFrame) -> dict:
     ref = df.iloc[-51:-1]
     if len(ref) >= 10:
         sh, sl = float(ref["high"].max()), float(ref["low"].min())
-        out["swing_high_dist_pct"] = (sh / lc["close"] - 1) * 100
+        # both expressed as a percentage of the current price: "price is X% below the swing high",
+        # "price is X% above the swing low" (negative = price already beyond the level)
+        out["swing_high_dist_pct"] = (1 - lc["close"] / sh) * 100
         out["swing_low_dist_pct"] = (lc["close"] / sl - 1) * 100
     return out
 
 
-def yearly_context(daily: pd.DataFrame) -> dict:
-    """One-year context from daily closed candles (used for the '1y' timeframe)."""
+def yearly_context(daily: pd.DataFrame, weekly: pd.DataFrame | None = None) -> dict:
+    """Long-term context (used for the '1y' timeframe).
+
+    `daily` should carry several years (1500 bars); the one-year statistics use the last 365,
+    the multi-year statistics (all-time high, yearly returns, 200-week average) use everything.
+    """
     d = daily.iloc[-365:]
     c = d["close"]
     last = float(c.iloc[-1])
     hi, lo = float(d["high"].max()), float(d["low"].min())
     out = {
         "bars": len(d),
+        "history_days": len(daily),
         "close": last,
         "high_52w": hi,
         "low_52w": lo,
@@ -179,4 +191,32 @@ def yearly_context(daily: pd.DataFrame) -> dict:
     peak = c.cummax()
     out["max_drawdown_pct"] = float(((c / peak) - 1).min() * 100)
     out["current_drawdown_pct"] = float((last / float(peak.iloc[-1]) - 1) * 100)
+
+    # ---- multi-year context from the full daily history ----
+    call = daily["close"]
+    ath = float(daily["high"].max())
+    ath_date = daily["high"].idxmax()
+    out["ath"] = ath
+    out["ath_dist_pct"] = (last / ath - 1) * 100
+    out["ath_days_ago"] = int((daily.index[-1] - ath_date).days)
+    out["ret_2y_pct"] = (last / float(call.iloc[-min(730, len(call))]) - 1) * 100 if len(call) > 400 else None
+    out["ret_3y_pct"] = (last / float(call.iloc[-min(1095, len(call))]) - 1) * 100 if len(call) > 800 else None
+    # calendar-year returns (last 3 completed + current year to date)
+    yearly = call.resample("YS").agg(["first", "last"]).dropna()
+    out["calendar_years"] = [
+        (int(ts.year), float((row["last"] / row["first"] - 1) * 100)) for ts, row in yearly.tail(4).iterrows()
+    ]
+    # monthly closes: direction of the last 3 completed months
+    monthly = call.resample("MS").last().dropna()
+    if len(monthly) >= 4:
+        m = monthly.iloc[-4:]  # 3 completed months + current partial
+        out["monthly_dirs"] = [bool(m.iloc[i] > m.iloc[i - 1]) for i in range(1, 4)]
+    # 200-week average (classic BTC cycle floor) from weekly closes when available
+    if weekly is not None and len(weekly) >= 200:
+        wc = weekly["close"]
+        out["sma200w"] = float(wc.rolling(200).mean().iloc[-1])
+        out["sma200w_dist_pct"] = (last / out["sma200w"] - 1) * 100
+        e20w, e50w = ema(wc, 20), ema(wc, 50)
+        out["weekly_stack_bull"] = bool(last > e20w.iloc[-1] > e50w.iloc[-1])
+        out["weekly_stack_bear"] = bool(last < e20w.iloc[-1] < e50w.iloc[-1])
     return out

@@ -44,7 +44,7 @@ def build_state(
     meta: dict = {"indicators": {}}
     for tf, df in frames.items():
         if tf in CONTEXT_ONLY:
-            y = yearly_context(df)
+            y = yearly_context(df, weekly=frames.get("1w"))
             timeframes[tf] = summarize_yearly(y)
             meta["indicators"][tf] = y
             continue

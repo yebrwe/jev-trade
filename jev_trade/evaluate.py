@@ -90,7 +90,7 @@ def evaluate(settings: Settings, path: Path | None = None, overrides: dict[str, 
         if d.action == (r.get("decision") or {}).get("action"):
             agree += 1
         if d.action in ("long", "short"):
-            res = broker.open(s.symbol, d.action, d.qty, d.stop_loss, d.take_profit)
+            res = broker.open(s.symbol, d.action, d.qty, d.stop_loss, d.take_profit, leverage=d.leverage)
             if "error" not in res:
                 broker.state["position"]["opened_at"] = ts
                 runtime.register_trade(ts)

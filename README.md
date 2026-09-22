@@ -82,9 +82,14 @@ python -m jev_trade news check          # Jev 스크리닝 1회 실행
 | 1m, 5m, 15m, 30m, 1h, 1d, 1w | Binance 네이티브 |
 | 10m | 5m 캔들을 리샘플링 |
 | 5h | 1h 캔들을 리샘플링 |
-| 1y | Binance에 연봉 캔들이 없으므로 **일봉 365개로 만든 1년 컨텍스트** (52주 레인지 위치, 1/3/6개월 수익률, 200일 EMA, 낙폭) |
+| 1y | Binance에 연봉 캔들이 없으므로 **일봉 1500개 + 주봉 전체로 만든 장기 컨텍스트**: 역대 고점 대비 위치, 200주 이동평균 대비 위치와 주봉 EMA 정렬, 연도별·2년·3년 수익률, 최근 3개월 월봉 방향, 52주 레인지, 1/3/6개월 수익률, 200일 EMA, 낙폭 |
 
 각 타임프레임은 마감된 캔들만 사용합니다(형성 중인 마지막 캔들은 제외). 실시간 정보는 `market` 블록으로 따로 전달됩니다.
+
+**이력 깊이와 EMA 정확도**: 타임프레임마다 캔들 1000개(일봉 1500개, 주봉은 존재하는 전부 약 370개)를 받습니다.
+EMA는 유한 구간에서 가중치를 정규화하는 방식(`ewm(adjust=True)`)이라 시작값 편향이 없고, 2500개 캔들로 완전히
+워밍업한 재귀 EMA와 비교해 EMA200 오차가 0.001% 이하입니다(300개만 쓰던 초기 버전은 일봉에서 약 1% 편차).
+한 사이클의 데이터 수집은 약 4초입니다.
 
 ## 설치와 실행
 
@@ -139,15 +144,35 @@ Binance 선물 테스트넷은 **Demo Trading**으로 통합되었습니다. 예
 
 | 변수 | 의미 |
 | --- | --- |
-| `MIN_ENTRY_CONFIDENCE`, `MIN_ENTRY_PROB` | `entry_action` Choice의 confidence / 선택지 확률 하한 |
+| `MIN_ENTRY_PROB`, `MIN_DIRECTION_EDGE` | 선택된 방향의 확률 하한, 그리고 P(방향)−P(반대) 하한. 3지선다에서는 hold 확률이 confidence를 희석하므로 방향 격차가 실질 확신 지표 |
 | `MIN_SETUP_SCORE` | `setup_quality` 기대 레벨 하한 (0 no edge … 3 strong) |
 | `CHOPPY_MAX` | `choppy` Noul 상한 |
 | `MIN_EXIT_PROB`, `THESIS_INVALIDATED_THRESHOLD` | 청산 게이트 |
-| `RISK_PER_TRADE_PCT`, `ATR_STOP_MULT`, `ATR_TP_MULT` | 손절 거리에서 역산하는 수량, 손절/익절 |
-| `MAX_POSITION_PCT`, `LEVERAGE`, `COOLDOWN_CANDLES`, `MAX_TRADES_PER_DAY` | 하드 리스크 한도 |
+| `LEVERAGE_TIERS`, `RISK_TIERS` | Jev `conviction` 등급(0 weak … 3 very strong)별 배수와 손절 시 손실 % |
+| `STOP_LIQ_RATIO_MAX`, `MAX_COST_PCT_OF_MARGIN` | 배수 안전 가드: 손절이 청산 거리의 절반 안에 있어야 하고, 수수료·펀딩이 증거금의 10% 이하 |
+| `ATR_STOP_MULT`, `ATR_TP_MULT` | 손절/익절 거리(판단 타임프레임 ATR 배수) |
+| `MAX_POSITION_PCT`, `COOLDOWN_CANDLES`, `MAX_TRADES_PER_DAY` | 하드 리스크 한도 |
 
 임계값을 바꿔도 Jev를 다시 호출할 필요가 없습니다. `decisions.jsonl`에 답변이 그대로 남으므로
 같은 답에 다른 정책을 적용해 볼 수 있습니다.
+
+## 확신 등급 기반 사이징과 배수
+
+Jev에게 배수 숫자를 묻지 않습니다(숫자 계산은 Jev의 약점). 대신 `conviction` Score로 확신 등급을 묻고 코드가 매핑합니다.
+
+| Jev 확신 | 손절 시 손실 (자본 대비) | 배수 |
+| --- | --- | --- |
+| weak | 0.5% | 10x |
+| moderate | 1.0% | 20x |
+| strong | 1.5% | 35x |
+| very strong | 2.0% | 50x |
+
+손익은 리스크%가 정하는 명목에서 나오고, 배수는 묶이는 증거금과 청산 거리만 정합니다. 코드는 등급을 정한 뒤
+손절 거리가 청산 거리의 절반을 넘으면 배수를 내리고, 왕복 수수료와 펀딩이 증거금의 10%를 넘어도 내리며,
+거래소 브래킷 최대 배수와 `MAX_POSITION_PCT`도 확인합니다. 진입 직전에 거래소 배수를 그 값으로 설정합니다.
+
+진입 판단은 당일 단기(5분~1시간) 지평입니다. 15m~1h가 방향, 1m~10m가 타이밍을 정하고, 5h·1d·1w·1y는
+거부권이 아니라 확신 등급을 올리거나 내리는 맥락입니다. 약한 확신은 진입을 막는 대신 작게 들어갑니다.
 
 ## 비용·지연
 

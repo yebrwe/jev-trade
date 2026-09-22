@@ -312,8 +312,61 @@ def summarize_yearly(y: dict) -> dict:
         else:
             s = "flat"
         lt = ("above" if above else "below") + " the 200-day EMA, which is " + s
+    # ---- multi-year ----
+    ath_d = y.get("ath_dist_pct")
+    if ath_d is None:
+        ath_txt = "n/a"
+    elif ath_d >= -3:
+        ath_txt = f"at the all-time high ({ath_d:+.1f}%)"
+    elif ath_d >= -20:
+        ath_txt = f"near the all-time high ({ath_d:+.1f}%, set {y.get('ath_days_ago')} days ago)"
+    elif ath_d >= -50:
+        ath_txt = f"well below the all-time high ({ath_d:+.1f}%, set {y.get('ath_days_ago')} days ago)"
+    else:
+        ath_txt = f"deep below the all-time high ({ath_d:+.1f}%, set {y.get('ath_days_ago')} days ago)"
+    cyc = "n/a"
+    if y.get("sma200w_dist_pct") is not None:
+        dist = y["sma200w_dist_pct"]
+        if dist < 0:
+            cyc = f"below the 200-week average by {-dist:.0f}% (historically a cycle-bottom zone)"
+        elif dist < 30:
+            cyc = f"just above the 200-week average (+{dist:.0f}%)"
+        elif dist < 100:
+            cyc = f"comfortably above the 200-week average (+{dist:.0f}%)"
+        else:
+            cyc = f"far above the 200-week average (+{dist:.0f}%, historically late-cycle territory)"
+        if y.get("weekly_stack_bull"):
+            cyc += "; weekly EMAs stacked bullish (price > EMA20w > EMA50w)"
+        elif y.get("weekly_stack_bear"):
+            cyc += "; weekly EMAs stacked bearish (price < EMA20w < EMA50w)"
+        else:
+            cyc += "; weekly EMAs not stacked (transition)"
+    years = y.get("calendar_years") or []
+    years_txt = ", ".join(f"{yr}: {r:+.0f}%" for yr, r in years) or "n/a"
+    if years:
+        years_txt += " (last entry is year-to-date)"
+    md = y.get("monthly_dirs")
+    if md:
+        ups = sum(md)
+        month_txt = ("three up months in a row" if ups == 3 else "three down months in a row" if ups == 0
+                     else f"{ups} of the last 3 months up")
+    else:
+        month_txt = "n/a"
+    multi = []
+    if y.get("ret_2y_pct") is not None:
+        multi.append(f"2y {y['ret_2y_pct']:+.0f}%")
+    if y.get("ret_3y_pct") is not None:
+        multi.append(f"3y {y['ret_3y_pct']:+.0f}%")
     return {
-        "note": "one-year context derived from daily candles (Binance has no native 1y candles)",
+        "note": (
+            f"long-term context from {y.get('history_days', 365)} daily candles and weekly candles "
+            "(Binance has no native 1y candles); the 1-year figures use the last 365 days"
+        ),
+        "all_time_high": ath_txt,
+        "cycle_position": cyc,
+        "calendar_year_returns": years_txt,
+        "multi_year_returns": ", ".join(multi) or "n/a",
+        "monthly_trend": month_txt,
         "yearly_regime": f"{regime} ({r1y:+.0f}% over 1 year)",
         "position_in_52w_range": (
             f"{where} ({y['dist_from_high_pct']:+.1f}% from high, {y['dist_from_low_pct']:+.1f}% from low)"

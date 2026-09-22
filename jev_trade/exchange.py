@@ -161,6 +161,23 @@ class Market:
         m = self.ex.market(symbol)
         return float((m.get("limits", {}).get("amount", {}) or {}).get("min") or 0.0)
 
+    def leverage_limits(self, symbol: str, notional: float) -> dict:
+        """Exchange bracket for this notional: {max_leverage, maint_rate}. Cached per process."""
+        tiers = getattr(self, "_tiers_cache", None)
+        if tiers is None:
+            try:
+                tiers = self.ex.fetch_leverage_tiers([symbol]).get(symbol, [])
+            except Exception as e:
+                print(f"[market] fetch_leverage_tiers failed: {e}")
+                tiers = []
+            self._tiers_cache = tiers
+        for t in tiers:
+            lo, hi = float(t.get("minNotional") or 0), float(t.get("maxNotional") or 1e18)
+            if lo <= notional <= hi:
+                return {"max_leverage": float(t.get("maxLeverage") or 0) or None,
+                        "maint_rate": float(t.get("maintenanceMarginRate") or 0) or None}
+        return {}
+
 
 class LiveBroker:
     """Real order execution on Binance USDT-M futures (one-way position mode assumed)."""
@@ -227,10 +244,6 @@ class LiveBroker:
             self.ex.set_margin_mode(self.s.margin_mode, symbol)
         except Exception as e:  # already set / not modifiable with open position
             print(f"[broker] set_margin_mode skipped: {e}")
-        try:
-            self.ex.set_leverage(self.s.leverage, symbol)
-        except Exception as e:
-            print(f"[broker] set_leverage failed: {e}")
         self._configured.add(symbol)
 
     def get_equity(self) -> float:
@@ -293,7 +306,17 @@ class LiveBroker:
             except Exception as e:
                 print(f"[broker] cancel_all_orders{params or ''} failed: {e}")
 
-    def open(self, symbol: str, side: str, qty: float, stop_loss: float, take_profit: float) -> dict:
+    def set_leverage(self, symbol: str, leverage: int) -> int:
+        """Set per-trade leverage; returns the leverage actually in effect."""
+        try:
+            self.ex.set_leverage(int(leverage), symbol)
+            return int(leverage)
+        except Exception as e:
+            print(f"[broker] set_leverage({leverage}) failed: {e}; keeping the current setting")
+            return int(self.s.leverage)
+
+    def open(self, symbol: str, side: str, qty: float, stop_loss: float, take_profit: float,
+             leverage: int | None = None) -> dict:
         # stale reduce-only stops from an earlier position would fire against the new one: clear them first
         try:
             if self.fetch_trigger_orders(symbol):
@@ -302,10 +325,12 @@ class LiveBroker:
         except Exception as e:
             print(f"[broker] could not check stale orders: {e}")
         self._configure(symbol)
+        lev_in_effect = self.set_leverage(symbol, leverage or self.s.leverage)
         order_side = "buy" if side == "long" else "sell"
         exit_side = "sell" if side == "long" else "buy"
         entry = self.ex.create_order(symbol, "market", order_side, qty, None, self._pos_params(side, closing=False))
-        result = {"entry": entry.get("id"), "stop": None, "take_profit": None, "opened_at": time.time()}
+        result = {"entry": entry.get("id"), "stop": None, "take_profit": None, "opened_at": time.time(),
+                  "leverage": lev_in_effect}
         try:
             sl = self.ex.create_order(
                 symbol, "market", exit_side, qty, None,
@@ -403,7 +428,8 @@ class PaperBroker:
             opened_at=p.get("opened_at"), stop_loss=p.get("stop_loss"), take_profit=p.get("take_profit"),
         )
 
-    def open(self, symbol: str, side: str, qty: float, stop_loss: float, take_profit: float) -> dict:
+    def open(self, symbol: str, side: str, qty: float, stop_loss: float, take_profit: float,
+             leverage: int | None = None) -> dict:
         if self.state.get("position"):
             return {"error": "position already open"}
         price = self.last_price
@@ -411,7 +437,7 @@ class PaperBroker:
             return {"error": "no mark price"}
         price = price * (1 + self.slippage) if side == "long" else price * (1 - self.slippage)
         self.state["position"] = {
-            "side": side, "qty": qty, "entry_price": price, "leverage": self.s.leverage,
+            "side": side, "qty": qty, "entry_price": price, "leverage": int(leverage or self.s.leverage),
             "opened_at": time.time(), "stop_loss": stop_loss, "take_profit": take_profit,
         }
         self._save()

@@ -23,12 +23,16 @@ SETUP_LEVELS = [
 
 def build_questions(has_position: bool, side: str | None = None, has_perspective: bool = False) -> dict:
     entry_guidance = [
-        "Give the higher timeframes (`timeframe_groups.higher`) more weight for direction "
-        "and the lower timeframes (`timeframe_groups.lower`) more weight for timing.",
-        "A long needs bullish trend readings on the higher timeframes and momentum turning up on the lower ones.",
-        "A short needs bearish trend readings on the higher timeframes and momentum turning down on the lower ones.",
-        "Choose hold when timeframes conflict, when most read sideways / range-bound, "
-        "or when momentum is already overbought (for long) or oversold (for short).",
+        "Trade horizon: intraday, the next one to several hours. The 15m, 30m and 1h readings decide the "
+        "direction; the 1m, 5m and 10m readings decide the timing.",
+        "The higher timeframes (5h, 1d, 1w) and `timeframes.1y` are context, not a veto: they raise or lower "
+        "conviction (asked separately) but a trade against them is allowed when the 15m-1h direction and the "
+        "lower-timeframe timing agree.",
+        "Valid long setups: a pullback toward EMA20/EMA50 inside a 15m-1h uptrend with 1m-10m momentum turning up; "
+        "or a breakout above a swing high with rising volume. Valid short setups are the mirror image.",
+        "Choose hold only when the 15m-1h readings are sideways / range-bound with no trend, when the lower "
+        "timeframes give no timing signal, or when the move is already extreme (RSI over 80 or under 20 on the "
+        "timing timeframes, price far outside the Bollinger bands).",
     ]
     if has_perspective:
         entry_guidance.append(
@@ -47,9 +51,12 @@ def build_questions(has_position: bool, side: str | None = None, has_perspective
                 "guidance": entry_guidance,
             },
             criteria={
-                "long": "open a new long (buy) position now: bullish readings dominate across timeframes and timing is favorable",
-                "short": "open a new short (sell) position now: bearish readings dominate across timeframes and timing is favorable",
-                "hold": "do not open a position now: readings are mixed, weak, sideways, or the move is already overextended",
+                "long": "open a long (buy) now: the 15m-1h direction is up (or a pullback inside an uptrend is ending) "
+                        "and the 1m-10m timing readings are turning up",
+                "short": "open a short (sell) now: the 15m-1h direction is down (or a bounce inside a downtrend is ending) "
+                         "and the 1m-10m timing readings are turning down",
+                "hold": "no tradeable intraday setup: the 15m-1h readings are sideways with no trend, the lower "
+                        "timeframes give no timing signal, or the move is already extreme",
             },
         ),
         "setup_quality": Score(
@@ -58,6 +65,24 @@ def build_questions(has_position: bool, side: str | None = None, has_perspective
                 "Judge agreement across timeframes, momentum confirmation, volume, and volatility."
             ),
             criteria=SETUP_LEVELS,
+        ),
+        "conviction": Score(
+            instructions=(
+                "Assume a position will be opened in the direction the indicators favor. How much conviction does "
+                "the whole picture give for that trade? Judge agreement across `timeframes`, momentum and volume "
+                "confirmation, whether `timeframes.1y` (long-term regime) and `perspective` (if present) favor the "
+                "same side, and whether volatility is tradeable. Code maps this to position size and leverage."
+            ),
+            criteria=[
+                "weak: only a few timeframes lean the same way, momentum is unconfirmed, or the long-term regime or "
+                "perspective points the other way",
+                "moderate: most timeframes agree and at least one momentum indicator confirms; nothing important "
+                "argues against the trade",
+                "strong: nearly all timeframes agree, momentum and volume confirm, and the long-term regime and "
+                "perspective favor the same side",
+                "very strong: everything above holds and a fresh trigger (breakout of a swing level, MACD cross, "
+                "band expansion after a squeeze) just happened on the lower timeframes with normal, not extreme, volatility",
+            ],
         ),
         "higher_lower_agree": Noul(
             instructions=(
@@ -80,14 +105,26 @@ def build_questions(has_position: bool, side: str | None = None, has_perspective
                 "false": "most timeframes show a clear uptrend or downtrend",
             },
         ),
-        "overextended": Noul(
+        "overbought": Noul(
             instructions=(
-                "Do the `rsi`, `stochastic`, and `bollinger` readings in `timeframes` indicate that the current move "
-                "is overextended (overbought in an up move, or oversold in a down move) and likely to pause or pull back?"
+                "Do the `rsi`, `stochastic`, and `bollinger` readings on the timing and direction timeframes "
+                "(1m, 5m, 10m, 15m, 30m, 1h in `timeframes`) show the market is OVERBOUGHT right now, so that a new "
+                "long would be buying into an exhausted up move?"
             ),
             criteria={
-                "true": "several timeframes read overbought / oversold, price is stretched outside the Bollinger bands, or bands are expanded after a big move",
-                "false": "momentum readings are neutral or mid-range and price sits inside the bands",
+                "true": "most of those timeframes read overbought (RSI 70+, stochastic 80+) or price is above the upper Bollinger band",
+                "false": "momentum on those timeframes is neutral, mid-range, or oversold; a pullback has already reset it",
+            },
+        ),
+        "oversold": Noul(
+            instructions=(
+                "Do the `rsi`, `stochastic`, and `bollinger` readings on the timing and direction timeframes "
+                "(1m, 5m, 10m, 15m, 30m, 1h in `timeframes`) show the market is OVERSOLD right now, so that a new "
+                "short would be selling into an exhausted down move?"
+            ),
+            criteria={
+                "true": "most of those timeframes read oversold (RSI 30-, stochastic 20-) or price is below the lower Bollinger band",
+                "false": "momentum on those timeframes is neutral, mid-range, or overbought; a bounce has already reset it",
             },
         ),
     }
@@ -145,9 +182,13 @@ class Judgment:
     entry_probs: dict[str, float]
     setup_score: float
     setup_confidence: float
-    higher_lower_agree: float
-    choppy: float
-    overextended: float
+    conviction_score: float = 1.0  # 0 weak .. 3 very strong (expected level)
+    conviction_confidence: float = 0.0
+    higher_lower_agree: float = 0.5
+    choppy: float = 0.0
+    overextended: float = 0.0  # max(overbought, oversold), kept for logs / older records
+    overbought: float = 0.0
+    oversold: float = 0.0
     position_action: str | None = None
     position_confidence: float | None = None
     position_probs: dict[str, float] | None = None
@@ -166,15 +207,20 @@ class Judgment:
 def parse(resp: SystemOneResponse) -> Judgment:
     ea = resp.choices["entry_action"]
     sq = resp.scores["setup_quality"]
+    cv = resp.scores.get("conviction")
     j = Judgment(
         entry_action=ea.choice,
         entry_confidence=ea.confidence,
         entry_probs=dict(ea.probabilities),
         setup_score=sq.score,
         setup_confidence=sq.confidence,
+        conviction_score=cv.score if cv else 1.0,
+        conviction_confidence=cv.confidence if cv else 0.0,
         higher_lower_agree=resp.nouls["higher_lower_agree"].noul,
         choppy=resp.nouls["choppy"].noul,
-        overextended=resp.nouls["overextended"].noul,
+        overbought=resp.nouls["overbought"].noul,
+        oversold=resp.nouls["oversold"].noul,
+        overextended=max(resp.nouls["overbought"].noul, resp.nouls["oversold"].noul),
         model=resp.model,
         input_tokens=resp.usage.input_tokens,
         raw={k: v.model_dump() for k, v in resp.answers.items()},

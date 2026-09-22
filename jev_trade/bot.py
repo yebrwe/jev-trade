@@ -95,6 +95,17 @@ class Bot:
         state, meta = build_state(frames, realtime, position, self.s, perspective=perspective)
         meta["perspective"] = perspective
         meta["shock_active"] = self.monitor.shock_active
+        # exchange leverage bracket (private endpoint: use the broker's authenticated session when live)
+        meta["leverage_limits"] = {}
+        if isinstance(self.broker, LiveBroker):
+            try:
+                if not hasattr(self, "_authed_market"):
+                    self._authed_market = Market(self.s, exchange=self.broker.ex)
+                meta["leverage_limits"] = self._authed_market.leverage_limits(
+                    self.s.symbol, max(self.broker.get_equity(), 1.0) * 5
+                )
+            except Exception as e:
+                print(f"[bot] leverage bracket lookup failed: {e}")
         return state, meta, position
 
     def run_once(self, execute: bool = True) -> dict:
@@ -144,7 +155,7 @@ class Bot:
                 return {"skipped": f"qty {qty} below exchange minimum (amount {min_amt}, notional {min_notional})"}
             sl = self.market.price_to_precision(self.s.symbol, d.stop_loss)
             tp = self.market.price_to_precision(self.s.symbol, d.take_profit)
-            res = self.broker.open(self.s.symbol, d.action, qty, sl, tp)
+            res = self.broker.open(self.s.symbol, d.action, qty, sl, tp, leverage=d.leverage)
             if "error" not in res:
                 self.runtime.register_trade(time.time())
                 self.runtime.position_opened_at = time.time()

@@ -1,0 +1,6 @@
+typesafe-sdk>=0.7.1
+ccxt>=4.5
+pandas>=2.2
+numpy>=1.26
+python-dotenv>=1.0
+pydantic>=2.0

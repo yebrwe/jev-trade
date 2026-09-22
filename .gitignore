@@ -1,0 +1,6 @@
+.env.local
+.env
+logs/
+__pycache__/
+*.pyc
+paper_state.json
